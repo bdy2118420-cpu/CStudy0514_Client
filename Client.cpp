@@ -1,163 +1,197 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
-#include <cstdlib>
+#define _CRT_SECURE_NO_WARNINGS
 
-#include <ws2tcpip.h>
-
-#include <iostream>
-
-#include <Winsock2.h>
-
+#include <winsock2.h>
 #include <conio.h>
+#include <iostream>
 
 #include "Packet.h"
 
-#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "ws2_32")
+
+
+#define SERVER_IP		"127.0.0.1"
+
+
+//4byte
+void MakePacketHeader(PacketHeader& OutPacketHeader, int DataSize, PacketType Type)
+{
+	OutPacketHeader.Size = htonl(DataSize);
+	OutPacketHeader.Code = htons(static_cast<unsigned short>(Type));
+}
+
+void SendAll(SOCKET ReceiverSocket, char* Data, int Size)
+{
+	int TotalSendDataSize = 0;
+	int WantSendDataSize = Size;
+	int SentBytes = 0;
+	int Count = 0;
+	do
+	{
+		SentBytes = send(ReceiverSocket, Data + TotalSendDataSize, WantSendDataSize - TotalSendDataSize, 0);
+		TotalSendDataSize += SentBytes;
+		printf("Send %dBytes %d Count\n", SentBytes, ++Count);
+	} while (TotalSendDataSize < WantSendDataSize);
+}
+
+void ProcessPositionPacket(SOCKET SenderSocket, int DataSize)
+{
+	PositionData Data;
+
+	int RecvBytes = recv(SenderSocket, (char*)&Data, DataSize, MSG_WAITALL);
+	Data.X = ntohl(Data.X);
+	Data.Y = ntohl(Data.Y);
+
+	printf("Player Position(%d, %d)\n", Data.X, Data.Y);
+}
+
 
 int main()
 {
-	WSADATA wsaData;
+	WSAData wsaData;
+	WSAStartup(MAKEWORD(2, 2), &wsaData);
 
-	int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	SOCKET ServerSocket = socket(PF_INET, SOCK_STREAM, 0);
 
-	if (result != 0)
-	{
-		std::cerr << "WSAStartup failed: " << result << std::endl;
-		exit(-1);
-	}
+	SOCKADDR_IN ServerAdress;
+	memset(&ServerAdress, 0, sizeof(ServerAdress));
+	ServerAdress.sin_family = PF_INET;
+	ServerAdress.sin_addr.s_addr = inet_addr(SERVER_IP);
+	ServerAdress.sin_port = htons(31000);
 
-	SOCKET ServerSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	int SendBufferSize = 0;
+	int RecvBufferSize = 0;
+	int BufferSizeLength = sizeof(SendBufferSize);
 
-	if (ServerSocket == INVALID_SOCKET)
-	{
-		std::cerr << "socket failed: " << WSAGetLastError() << std::endl;
-		WSACleanup();
-		exit(-1);
-	}
+	RecvBufferSize = 8 * 1024; // 1000 -> 1k, 2^10  1024
+	BufferSizeLength = sizeof(RecvBufferSize);
 
-	SOCKADDR_IN ServerSockADDR;
-	ServerSockADDR.sin_family = AF_INET;
-	ServerSockADDR.sin_port = htons(31000);
-	ServerSockADDR.sin_addr.s_addr = inet_addr("127.0.0.1");
+	//getsockopt(ServerSocket, SOL_SOCKET, SO_SNDBUF, (char*)&SendBufferSize, &BufferSizeLength);
+	//printf("Send Buffer Size: %d\n", SendBufferSize);
 
-	result = connect(ServerSocket, (SOCKADDR*)&ServerSockADDR, sizeof(ServerSockADDR));
-	if(result == SOCKET_ERROR)
-	{
-		std::cout << "connect failed: " << WSAGetLastError() << std::endl;
-		closesocket(ServerSocket);
-		WSACleanup();
-		exit(-1);
-	}
+
+	//setsockopt(ServerSocket, SOL_SOCKET, SO_SNDBUF, (char*)&SendBufferSize, BufferSizeLength);
+
+	getsockopt(ServerSocket, SOL_SOCKET, SO_RCVBUF, (char*)&RecvBufferSize, &BufferSizeLength);
+	printf("Receive Buffer Size: %d\n", RecvBufferSize);
+
+	setsockopt(ServerSocket, SOL_SOCKET, SO_RCVBUF, (char*)&RecvBufferSize, sizeof(RecvBufferSize));
+
+	getsockopt(ServerSocket, SOL_SOCKET, SO_RCVBUF, (char*)&RecvBufferSize, &BufferSizeLength);
+	printf("Receive Buffer Size: %d\n", RecvBufferSize);
+
+	//3way handshake
+	connect(ServerSocket, (SOCKADDR*)&ServerAdress, sizeof(ServerAdress));
+
+	//authentication(인증), 로그인, 몬가 준다.(token, key), 인가(authorization)
 
 	while (true)
 	{
-		char Dir;
-		Dir = _getch();
-
-		printf("SendData: %c ReturnData : ", Dir);
-
 		PacketHeader Header;
-		Header.Size = sizeof(char);
-		Header.Code = (unsigned short)PacketType::Move;
 
+		MoveData Data;
+		Data.Dir = _getch();
 
-		Header.Size = htons(Header.Size);
-		Header.Code = htons(Header.Code);
-
-
-		int WantedBytes = sizeof(Header);
-		int SendBytes = 0;
-		int TotalSentBytes = 0;
-
-		do
+		if (Data.Dir == 'F' || Data.Dir == 'f')
 		{
-			SendBytes = send(ServerSocket, (char*)&Header, sizeof(Header), 0);
-			if (SendBytes == 0)
-			{
-				std::cout << "Connection closed by server." << std::endl;
-				break;
-			}
-			else if (SendBytes < 0)
-			{
-				std::cout << "send failed: " << WSAGetLastError() << std::endl;
-				break;
-			}
-			TotalSentBytes += SendBytes;
-		} while (WantedBytes > TotalSentBytes);
-		
-		/*char Data[1024] = { 0, };
-		int Temp = htonl(Dir);
-		memcpy(&Data[0], &Temp, sizeof(char));*/
+			//파일 요청
+			//Header
+			//4byte
+			MakePacketHeader(Header, sizeof(MoveData), PacketType::C2S_File);
 
-		WantedBytes = sizeof(char);
-		SendBytes = 0;
-		TotalSentBytes = 0;
+			//[][][][] []... []
+			char Buffer[1024] = { 0, };
+			//[][][][] [][]
+			memcpy(Buffer, &Header, sizeof(Header));
+			SendAll(ServerSocket, Buffer, sizeof(Header) + sizeof(Data));
 
-		do
-		{
-			SendBytes = send(ServerSocket, &Dir, WantedBytes - TotalSentBytes, 0);
-			if (SendBytes == 0)
-			{
-				std::cout << "Connection closed by server." << std::endl;
-				break;
-			}
-			else if (SendBytes < 0)
-			{
-				std::cout << "send failed: " << WSAGetLastError() << std::endl;
-				break;
-			}
-			TotalSentBytes += SendBytes;
-		} while (WantedBytes > TotalSentBytes);
-		
-		PacketHeader ReceivedHeader;
-		int WantRecvBytes = sizeof(ReceivedHeader);
-		int RecvBytes = 0;
-		int TotalRecvBytes = 0;
+			//파일 받기 헤더
+			int RecvBytes = recv(ServerSocket, (char*)&Header, sizeof(Header), MSG_WAITALL);
+			Header.Size = ntohl(Header.Size);
+			Header.Code = ntohs(Header.Code);
 
-		do
-		{
-			RecvBytes = recv(ServerSocket, (char*)&ReceivedHeader + TotalRecvBytes, WantRecvBytes - TotalRecvBytes, 0);
-			if (RecvBytes == 0)
+			//[][][][][][].. []
+			switch ((PacketType)(Header.Code))
 			{
-				std::cout << "Connection closed by server." << std::endl;
-				break;
-			}
-			else if (RecvBytes < 0)
-			{
-				std::cout << "recv failed: " << WSAGetLastError() << std::endl;
-				break;
-			}
-			TotalRecvBytes += RecvBytes;
-		} while (WantRecvBytes > TotalRecvBytes);
+			case PacketType::S2C_File:
 
-		if(static_cast<PacketType>(ntohs(ReceivedHeader.Code)) == PacketType::Position)
-		{
-			PositionData PosData;
-			WantRecvBytes = ntohs(ReceivedHeader.Size);
-			RecvBytes = 0;
-			TotalRecvBytes = 0;
-			do
-			{
-				RecvBytes = recv(ServerSocket, (char*)&PosData + TotalRecvBytes, WantRecvBytes - TotalRecvBytes, 0);
-				if (RecvBytes == 0)
+				//파일 받아서 작성
+				FILE* OutputFile = fopen("카네이션_2.png", "wb");
+
+				int FileSize = Header.Size;
+				int TotalFileWriteSize = 0;
+				char Buffer[512] = { 0, };
+				size_t WriteSize = 0;
+				int Count = 0;
+
+				do
 				{
-					std::cout << "Connection closed by server." << std::endl;
-					break;
-				}
-				else if (RecvBytes < 0)
-				{
-					std::cout << "recv failed: " << WSAGetLastError() << std::endl;
-					break;
-				}
-				TotalRecvBytes += RecvBytes;
-			} while (WantRecvBytes > TotalRecvBytes);
+					printf("%d\n", ++Count);
+					int RecvBytes = 0;
+					//8192 작은 파일 이면 버퍼만큼 받는게 아니라 
+					if (FileSize - TotalFileWriteSize < sizeof(Buffer))
+					{
+						//받을 사이즈가 버퍼보다 작을경우
+						RecvBytes = recv(ServerSocket, Buffer, FileSize - TotalFileWriteSize, MSG_WAITALL);
+						if (RecvBytes <= 0)
+						{
+							break;
+						}
+					}
+					else
+					{
+						RecvBytes = recv(ServerSocket, Buffer, sizeof(Buffer), MSG_WAITALL);
+						if (RecvBytes <= 0)
+						{
+							break;
+						}
+					}
 
-			printf("X: %d Y: %d\n", ntohl(PosData.X), ntohl(PosData.Y));
+					WriteSize = fwrite(Buffer, sizeof(char), RecvBytes, OutputFile);
+					TotalFileWriteSize += (int)WriteSize;
+				} while (TotalFileWriteSize < FileSize);
+
+				fclose(OutputFile);
+				break;
+			}
+
+		}
+		else
+		{
+			//이동 요청
+			MakePacketHeader(Header, sizeof(MoveData), PacketType::Move);
+
+
+			//[][][][] []... []
+			char Buffer[1024] = { 0, };
+			//[][] [][]
+			memcpy(Buffer, &Header, sizeof(Header));
+			memcpy(&Buffer[0] + sizeof(Header), &Data, sizeof(Data));
+
+			SendAll(ServerSocket, Buffer, sizeof(Header) + sizeof(Data));
+
+
+			//Header
+			//4byte
+			int RecvBytes = recv(ServerSocket, (char*)&Header, sizeof(Header), MSG_WAITALL);
+			Header.Size = ntohl(Header.Size);
+			Header.Code = ntohs(Header.Code);
+
+			switch ((PacketType)(Header.Code))
+			{
+			case PacketType::Position:
+				ProcessPositionPacket(ServerSocket, Header.Size);
+				break;
+			}
 		}
 
 	}
 
-	shutdown(ServerSocket, SD_BOTH);
 	closesocket(ServerSocket);
+
+
 	WSACleanup();
-	return 0;
 }
+
+
+
